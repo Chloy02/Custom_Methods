@@ -33,19 +33,21 @@ export async function captchaRedirectToWikipedia(ctx: WalnutContext) {
     'just a moment',             // Cloudflare "Just a moment..." title
   ];
 
-  // Check for CAPTCHA selectors
+  // Check for CAPTCHA selectors — use count() instead of isVisible() to avoid
+  // strict mode violations when a selector matches multiple elements (e.g. reCAPTCHA
+  // injects two iframes: the checkbox widget and the challenge popup).
   let captchaFound = false;
 
   for (const selector of captchaSelectors) {
-    const visible = await ctx.isVisible(selector);
-    if (visible) {
-      ctx.log(`CAPTCHA detected via selector: ${selector}`);
+    const matched = await ctx.count(selector);
+    if (matched > 0) {
+      ctx.log(`CAPTCHA detected via selector: ${selector} (${matched} element(s))`);
       captchaFound = true;
       break;
     }
   }
 
-  // Check page text if no selector match yet
+  // Check page title / URL if no selector match yet
   if (!captchaFound) {
     const pageTitle = (await ctx.getTitle()).toLowerCase();
     const pageUrl = ctx.getUrl().toLowerCase();
@@ -60,10 +62,10 @@ export async function captchaRedirectToWikipedia(ctx: WalnutContext) {
   }
 
   if (!captchaFound) {
-    // Last resort: check visible text on the page body
+    // Last resort: count visible text nodes on the page body
     for (const pattern of captchaTextPatterns) {
-      const visible = await ctx.isVisible(`text=${pattern}`);
-      if (visible) {
+      const matched = await ctx.count(`text=${pattern}`);
+      if (matched > 0) {
         ctx.log(`CAPTCHA detected via visible text: "${pattern}"`);
         captchaFound = true;
         break;
