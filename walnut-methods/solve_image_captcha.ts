@@ -42,6 +42,12 @@ export async function solveImageCaptcha(ctx: WalnutContext) {
   /**
    * Inject Tesseract.js from CDN into the page (once) and run OCR entirely
    * inside the browser context — avoids any Node.js / __dirname issues.
+   *
+   * Accuracy improvements vs default:
+   *  - PSM 8  → treat image as a single word (ideal for short CAPTCHAs)
+   *  - OEM 1  → LSTM neural network engine only
+   *  - char whitelist → alphanumeric only, no punctuation noise
+   *  - preserve_interword_spaces 0 → collapse spaces between chars
    */
   async function ocrViaBrowser(dataUrl: string): Promise<string> {
     const result: string = await ctx.evaluate(`
@@ -58,13 +64,19 @@ export async function solveImageCaptcha(ctx: WalnutContext) {
           window.__tesseractLoaded = true;
         }
 
-        // Run OCR
+        // Run OCR with accuracy-tuned parameters
         const { data } = await Tesseract.recognize(
           ${JSON.stringify(dataUrl)},
           'eng',
-          { tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789' }
+          {
+            tessedit_pageseg_mode: '8',   // PSM 8 — single word
+            tessedit_ocr_engine_mode: '1', // OEM 1 — LSTM only
+            tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789',
+            preserve_interword_spaces: '0',
+          }
         );
-        return data.text.replace(/\\s+/g, '').trim();
+        // Strip ALL whitespace and non-alphanumeric noise
+        return data.text.replace(/[^A-Za-z0-9]/g, '').trim();
       })()
     `);
     return result ?? '';
@@ -84,8 +96,10 @@ export async function solveImageCaptcha(ctx: WalnutContext) {
   }
 
   /**
-   * Grab the CAPTCHA image and convert it to a base64 data-URL.
-   * Handles both <img> and <canvas> elements, and both CSS and XPath selectors.
+   * Grab the CAPTCHA image, upscale it 4x, convert to grayscale,
+   * boost contrast, and apply a binary threshold — then return as
+   * a base64 data-URL ready for OCR.
+   * Handles <img> and <canvas>, CSS and XPath selectors.
    */
   async function getCaptchaDataUrl(): Promise<string> {
     const elSnippet = resolveElementSnippet(captchaImageSelector);
@@ -93,18 +107,47 @@ export async function solveImageCaptcha(ctx: WalnutContext) {
       (function() {
         const el = ${elSnippet};
         if (!el) return '';
-        if (el.tagName === 'CANVAS') return el.toDataURL('image/png');
-        if (el.tagName === 'IMG') {
-          if (el.src.startsWith('data:')) return el.src;
-          // Draw onto a canvas to get base64 (works for same-origin images)
-          const canvas = document.createElement('canvas');
-          canvas.width  = el.naturalWidth  || el.width  || 200;
-          canvas.height = el.naturalHeight || el.height || 60;
-          const c = canvas.getContext('2d');
-          c.drawImage(el, 0, 0);
-          return canvas.toDataURL('image/png');
+
+        // Resolve raw image element
+        let img = el;
+        if (el.tagName === 'CANVAS') {
+          // Convert canvas to img so we can redraw at scale
+          const tmp = new Image();
+          tmp.src = el.toDataURL('image/png');
+          img = tmp;
         }
-        return '';
+
+        const SCALE      = 4;      // upscale factor — bigger = more pixels for Tesseract
+        const THRESHOLD  = 140;    // 0-255 — pixels darker than this become black
+        const CONTRAST   = 1.8;    // contrast multiplier applied before threshold
+
+        const srcW = img.naturalWidth  || img.width  || 200;
+        const srcH = img.naturalHeight || img.height || 60;
+
+        // Step 1 — draw original at 4× size into an offscreen canvas
+        const scaled = document.createElement('canvas');
+        scaled.width  = srcW * SCALE;
+        scaled.height = srcH * SCALE;
+        const sc = scaled.getContext('2d');
+        sc.imageSmoothingEnabled = false; // keep hard pixel edges
+        sc.drawImage(img, 0, 0, scaled.width, scaled.height);
+
+        // Step 2 — read pixel data and apply grayscale + contrast + threshold
+        const imageData = sc.getImageData(0, 0, scaled.width, scaled.height);
+        const d = imageData.data;
+        for (let i = 0; i < d.length; i += 4) {
+          // Luminance-weighted grayscale
+          const gray = 0.299 * d[i] + 0.587 * d[i+1] + 0.114 * d[i+2];
+          // Contrast: stretch around midpoint 128
+          const contrasted = Math.min(255, Math.max(0, CONTRAST * (gray - 128) + 128));
+          // Binary threshold — black text on white background
+          const bw = contrasted < THRESHOLD ? 0 : 255;
+          d[i] = d[i+1] = d[i+2] = bw;
+          // d[i+3] = alpha, leave unchanged
+        }
+        sc.putImageData(imageData, 0, 0);
+
+        return scaled.toDataURL('image/png');
       })()
     `);
     return dataUrl ?? '';
