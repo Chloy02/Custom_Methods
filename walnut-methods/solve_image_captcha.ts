@@ -1,5 +1,4 @@
 import type { WalnutContext } from './walnut';
-import Tesseract from 'tesseract.js';
 
 /** @walnut_method
  * name: Solve Image CAPTCHA
@@ -29,8 +28,39 @@ export async function solveImageCaptcha(ctx: WalnutContext) {
   ];
 
   /**
-   * Grab the CAPTCHA image src from the DOM and convert it to a base64
-   * data-URL that Tesseract can consume (handles both <img> and <canvas>).
+   * Inject Tesseract.js from CDN into the page (once) and run OCR entirely
+   * inside the browser context — avoids any Node.js / __dirname issues.
+   */
+  async function ocrViaBrowser(dataUrl: string): Promise<string> {
+    const result: string = await ctx.evaluate(`
+      (async function() {
+        // Inject Tesseract.js CDN script if not already loaded
+        if (!window.__tesseractLoaded) {
+          await new Promise((resolve, reject) => {
+            const s = document.createElement('script');
+            s.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
+            s.onload = resolve;
+            s.onerror = reject;
+            document.head.appendChild(s);
+          });
+          window.__tesseractLoaded = true;
+        }
+
+        // Run OCR
+        const { data } = await Tesseract.recognize(
+          ${JSON.stringify(dataUrl)},
+          'eng',
+          { tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789' }
+        );
+        return data.text.replace(/\\s+/g, '').trim();
+      })()
+    `);
+    return result ?? '';
+  }
+
+  /**
+   * Grab the CAPTCHA image and convert it to a base64 data-URL.
+   * Handles both <img> and <canvas> elements.
    */
   async function getCaptchaDataUrl(): Promise<string> {
     const dataUrl: string = await ctx.evaluate(`
@@ -40,29 +70,18 @@ export async function solveImageCaptcha(ctx: WalnutContext) {
         if (el.tagName === 'CANVAS') return el.toDataURL('image/png');
         if (el.tagName === 'IMG') {
           if (el.src.startsWith('data:')) return el.src;
-          // Draw cross-origin img onto a canvas to get base64
+          // Draw onto a canvas to get base64 (works for same-origin images)
           const canvas = document.createElement('canvas');
           canvas.width  = el.naturalWidth  || el.width  || 200;
           canvas.height = el.naturalHeight || el.height || 60;
-          const ctx2d = canvas.getContext('2d');
-          ctx2d.drawImage(el, 0, 0);
+          const c = canvas.getContext('2d');
+          c.drawImage(el, 0, 0);
           return canvas.toDataURL('image/png');
         }
         return '';
       })()
     `);
-    return dataUrl;
-  }
-
-  /**
-   * Run Tesseract OCR on a base64 data-URL and return cleaned text.
-   * Strips whitespace and characters that are unlikely in simple CAPTCHAs.
-   */
-  async function ocr(dataUrl: string): Promise<string> {
-    const { data } = await Tesseract.recognize(dataUrl, 'eng', {
-      tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789',
-    } as any);
-    return data.text.replace(/\s+/g, '').trim();
+    return dataUrl ?? '';
   }
 
   /**
@@ -76,31 +95,31 @@ export async function solveImageCaptcha(ctx: WalnutContext) {
     return false;
   }
 
-  // ── Main retry loop ────────────────────────────────────────────────────────
+  // ── Main retry loop ──────────────────────────────────────────────────────────
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     ctx.log(`Attempt ${attempt} of ${MAX_ATTEMPTS}: reading CAPTCHA image…`);
 
-    // 1. Give the image a moment to fully render (especially after a refresh)
+    // 1. Wait for the image to fully render (especially after a refresh)
     await ctx.wait(800);
 
     // 2. Grab the image as a data-URL
     const dataUrl = await getCaptchaDataUrl();
     if (!dataUrl) {
-      ctx.warn(`Could not read CAPTCHA image (selector: "${captchaImageSelector}"). Retrying…`);
+      ctx.warn(`Could not read CAPTCHA image (selector: "${captchaImageSelector}"). Clicking refresh…`);
       await ctx.click(refreshSelector);
       continue;
     }
 
-    // 3. OCR the image
+    // 3. OCR the image inside the browser (no Node.js dependency)
     let captchaText = '';
     try {
-      captchaText = await ocr(dataUrl);
+      captchaText = await ocrViaBrowser(dataUrl);
     } catch (err: any) {
       ctx.warn(`OCR failed on attempt ${attempt}: ${err?.message ?? err}`);
     }
 
     if (!captchaText) {
-      ctx.warn(`OCR returned empty text on attempt ${attempt}. Clicking refresh and retrying…`);
+      ctx.warn(`OCR returned empty text on attempt ${attempt}. Clicking refresh…`);
       await ctx.click(refreshSelector);
       continue;
     }
@@ -117,12 +136,12 @@ export async function solveImageCaptcha(ctx: WalnutContext) {
     // 6. Check for a visible error message
     const errorVisible = await hasVisibleError();
     if (errorVisible) {
-      ctx.warn(`Error detected after entering CAPTCHA on attempt ${attempt}. Clicking refresh and retrying…`);
+      ctx.warn(`Error detected after entering CAPTCHA on attempt ${attempt}. Clicking refresh…`);
       await ctx.click(refreshSelector);
       continue;
     }
 
-    // No error — we're done
+    // No error — done
     ctx.log(`CAPTCHA solved successfully on attempt ${attempt}.`);
     return;
   }
