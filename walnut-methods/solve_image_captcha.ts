@@ -219,21 +219,34 @@ export async function solveImageCaptcha(ctx: WalnutContext) {
   }
 
   // ── Main retry loop ──────────────────────────────────────────────────────────
+  //
+  // Correct flow per attempt:
+  //   1. Wait for CAPTCHA image to render
+  //   2. Read + OCR the image
+  //   3. Type result into input field
+  //   4. Click Login
+  //   5. Wait for page to react
+  //   6. If popup appears → click Ok → click Refresh → wait for new image → loop
+  //   7. If inline error  → click Refresh → wait for new image → loop
+  //   8. No popup + no error → success, stop
+  //
+  // Refresh always happens BEFORE continuing so the new CAPTCHA is fully
+  // loaded by the time the next iteration reads the image.
+
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     ctx.log(`Attempt ${attempt} of ${MAX_ATTEMPTS}: reading CAPTCHA image…`);
 
-    // 1. Wait for the image to fully render (especially after a refresh)
-    await ctx.wait(800);
+    // ── STEP 1: wait for the CAPTCHA image to be fully rendered ──────────────
+    await ctx.wait(1000);
 
-    // 2. Grab the image as a data-URL
+    // ── STEP 2: grab + preprocess + OCR the image ────────────────────────────
     const dataUrl = await getCaptchaDataUrl();
     if (!dataUrl) {
-      ctx.warn(`Could not read CAPTCHA image (selector: "${captchaImageSelector}"). Clicking refresh…`);
+      ctx.warn(`Could not read CAPTCHA image. Refreshing and retrying…`);
       await ctx.click(refreshSelector);
-      continue;
+      continue; // next iteration will wait again before reading
     }
 
-    // 3. OCR the image inside the browser (no Node.js dependency)
     let captchaText = '';
     try {
       captchaText = await ocrViaBrowser(dataUrl);
@@ -242,41 +255,43 @@ export async function solveImageCaptcha(ctx: WalnutContext) {
     }
 
     if (!captchaText) {
-      ctx.warn(`OCR returned empty text on attempt ${attempt}. Clicking refresh…`);
+      ctx.warn(`OCR returned empty text. Refreshing and retrying…`);
       await ctx.click(refreshSelector);
       continue;
     }
 
     ctx.log(`OCR result: "${captchaText}"`);
 
-    // 4. Clear the input and type the recognised text
+    // ── STEP 3: type the CAPTCHA text into the input field ───────────────────
     await ctx.clear(inputSelector);
     await ctx.type(inputSelector, captchaText);
 
-    // 5. Click the login button to submit
-    ctx.log(`Clicking login button ("${loginSelector}")…`);
+    // ── STEP 4: click Login ───────────────────────────────────────────────────
+    ctx.log(`Clicking Login…`);
     await ctx.click(loginSelector);
 
-    // 6. Wait briefly for the page/popup to react
-    await ctx.wait(600);
+    // ── STEP 5: wait for the page / popup to react ───────────────────────────
+    await ctx.wait(800);
 
-    // 7. Check for the "Invalid Captcha" popup and dismiss it if present
+    // ── STEP 6: check for the "Invalid Captcha" popup ────────────────────────
     const popupDismissed = await dismissPopupIfPresent();
     if (popupDismissed) {
-      ctx.warn(`Invalid Captcha popup dismissed on attempt ${attempt}. Clicking refresh and retrying…`);
+      // Popup was wrong captcha → dismiss popup, THEN refresh for a new image
+      ctx.warn(`Wrong CAPTCHA on attempt ${attempt}. Dismissed popup, refreshing image…`);
       await ctx.click(refreshSelector);
+      // No extra wait here — the next iteration's STEP 1 handles the wait
       continue;
     }
 
-    // 8. Also check for inline error text as a fallback
+    // ── STEP 7: fallback — check for inline error text ───────────────────────
     const errorVisible = await hasVisibleError();
     if (errorVisible) {
-      ctx.warn(`Error text detected after attempt ${attempt}. Clicking refresh and retrying…`);
+      ctx.warn(`Error text detected on attempt ${attempt}. Refreshing image…`);
       await ctx.click(refreshSelector);
       continue;
     }
 
-    // No popup, no error — login succeeded
+    // ── STEP 8: no popup, no error — login succeeded ─────────────────────────
     ctx.log(`CAPTCHA solved and login submitted successfully on attempt ${attempt}.`);
     return;
   }
