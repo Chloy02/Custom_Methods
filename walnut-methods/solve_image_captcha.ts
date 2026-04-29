@@ -2,7 +2,7 @@ import type { WalnutContext } from './walnut';
 
 /** @walnut_method
  * name: Solve Image CAPTCHA
- * description: Reads the image CAPTCHA at ${captchaImageSelector}, types the result into ${inputSelector}, and retries using ${refreshSelector} if an error occurs
+ * description: Reads the image CAPTCHA at ${captchaImageSelector}, types the result into ${inputSelector}, clicks ${loginSelector}, and retries using ${refreshSelector} if an error or popup occurs
  * actionType: custom_solve_image_captcha
  * context: web
  * needsLocator: false
@@ -11,7 +11,8 @@ import type { WalnutContext } from './walnut';
 export async function solveImageCaptcha(ctx: WalnutContext) {
   const captchaImageSelector = ctx.args[0]; // from ${captchaImageSelector}
   const inputSelector        = ctx.args[1]; // from ${inputSelector}
-  const refreshSelector      = ctx.args[2]; // from ${refreshSelector}
+  const loginSelector        = ctx.args[2]; // from ${loginSelector}
+  const refreshSelector      = ctx.args[3]; // from ${refreshSelector}
 
   const MAX_ATTEMPTS = 3;
 
@@ -20,11 +21,22 @@ export async function solveImageCaptcha(ctx: WalnutContext) {
     'timed out',
     'expired',
     'incorrect',
+    'invalid captcha',
     'invalid',
     'wrong',
     'try again',
     'captcha error',
     'verification failed',
+  ];
+
+  // Selectors for the "Invalid Captcha" popup Ok/Cancel dialog
+  // Matches a button whose visible text is exactly "Ok" (case-insensitive)
+  const popupOkSelectors = [
+    'button:has-text("Ok")',
+    'button:has-text("OK")',
+    'input[value="Ok"]',
+    'input[value="OK"]',
+    'a:has-text("Ok")',
   ];
 
   /**
@@ -109,6 +121,23 @@ export async function solveImageCaptcha(ctx: WalnutContext) {
     return false;
   }
 
+  /**
+   * Check whether the "Invalid Captcha" popup is visible and, if so,
+   * click its Ok button to dismiss it. Returns true if popup was found.
+   */
+  async function dismissPopupIfPresent(): Promise<boolean> {
+    for (const sel of popupOkSelectors) {
+      const found = await ctx.count(sel);
+      if (found > 0) {
+        ctx.log(`Popup detected — clicking Ok button ("${sel}")`);
+        await ctx.click(sel);
+        await ctx.wait(400);
+        return true;
+      }
+    }
+    return false;
+  }
+
   // ── Main retry loop ──────────────────────────────────────────────────────────
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     ctx.log(`Attempt ${attempt} of ${MAX_ATTEMPTS}: reading CAPTCHA image…`);
@@ -144,19 +173,31 @@ export async function solveImageCaptcha(ctx: WalnutContext) {
     await ctx.clear(inputSelector);
     await ctx.type(inputSelector, captchaText);
 
-    // 5. Short pause so the page can react before we check for errors
-    await ctx.wait(500);
+    // 5. Click the login button to submit
+    ctx.log(`Clicking login button ("${loginSelector}")…`);
+    await ctx.click(loginSelector);
 
-    // 6. Check for a visible error message
-    const errorVisible = await hasVisibleError();
-    if (errorVisible) {
-      ctx.warn(`Error detected after entering CAPTCHA on attempt ${attempt}. Clicking refresh…`);
+    // 6. Wait briefly for the page/popup to react
+    await ctx.wait(600);
+
+    // 7. Check for the "Invalid Captcha" popup and dismiss it if present
+    const popupDismissed = await dismissPopupIfPresent();
+    if (popupDismissed) {
+      ctx.warn(`Invalid Captcha popup dismissed on attempt ${attempt}. Clicking refresh and retrying…`);
       await ctx.click(refreshSelector);
       continue;
     }
 
-    // No error — done
-    ctx.log(`CAPTCHA solved successfully on attempt ${attempt}.`);
+    // 8. Also check for inline error text as a fallback
+    const errorVisible = await hasVisibleError();
+    if (errorVisible) {
+      ctx.warn(`Error text detected after attempt ${attempt}. Clicking refresh and retrying…`);
+      await ctx.click(refreshSelector);
+      continue;
+    }
+
+    // No popup, no error — login succeeded
+    ctx.log(`CAPTCHA solved and login submitted successfully on attempt ${attempt}.`);
     return;
   }
 
