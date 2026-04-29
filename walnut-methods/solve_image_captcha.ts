@@ -96,61 +96,98 @@ export async function solveImageCaptcha(ctx: WalnutContext) {
   }
 
   /**
-   * Grab the CAPTCHA image, upscale it 4x, convert to grayscale,
-   * boost contrast, and apply a binary threshold — then return as
-   * a base64 data-URL ready for OCR.
-   * Handles <img> and <canvas>, CSS and XPath selectors.
+   * Grab the CAPTCHA image and preprocess it for OCR:
+   *  1. Use Playwright screenshot of the element (pixel-perfect, no CORS issues)
+   *     falling back to canvas draw if screenshot is unavailable.
+   *  2. Upscale 4×.
+   *  3. Saturation-aware pixel classification:
+   *     — Colorful pixels (high saturation) → black  (catches colored letters)
+   *     — Dark pixels (low brightness)      → black  (catches dark letters)
+   *     — Everything else                   → white  (background)
+   *  This preserves ALL character colors (green, orange, blue, dark) and
+   *  removes the light/white background cleanly.
    */
   async function getCaptchaDataUrl(): Promise<string> {
-    const elSnippet = resolveElementSnippet(captchaImageSelector);
-    const dataUrl: string = await ctx.evaluate(`
-      (function() {
-        const el = ${elSnippet};
-        if (!el) return '';
+    // Try Playwright native element screenshot first — best quality
+    let rawDataUrl = '';
+    try {
+      const isXPath = captchaImageSelector.startsWith('/') || captchaImageSelector.startsWith('(');
+      const pwSelector = isXPath ? `xpath=${captchaImageSelector}` : captchaImageSelector;
+      const screenshotBuf: Buffer = await (ctx as any).page.locator(pwSelector).screenshot();
+      rawDataUrl = 'data:image/png;base64,' + screenshotBuf.toString('base64');
+    } catch (_) {
+      // Fallback: canvas draw inside browser
+    }
 
-        // Resolve raw image element
-        let img = el;
-        if (el.tagName === 'CANVAS') {
-          // Convert canvas to img so we can redraw at scale
-          const tmp = new Image();
-          tmp.src = el.toDataURL('image/png');
-          img = tmp;
-        }
+    // If Playwright screenshot failed, fall back to in-browser canvas draw
+    if (!rawDataUrl) {
+      const elSnippet = resolveElementSnippet(captchaImageSelector);
+      rawDataUrl = await ctx.evaluate(`
+        (function() {
+          const el = ${elSnippet};
+          if (!el) return '';
+          const srcW = el.naturalWidth  || el.width  || 200;
+          const srcH = el.naturalHeight || el.height || 60;
+          const c = document.createElement('canvas');
+          c.width = srcW; c.height = srcH;
+          c.getContext('2d').drawImage(el, 0, 0);
+          return c.toDataURL('image/png');
+        })()
+      `);
+    }
 
-        const SCALE      = 4;      // upscale factor — bigger = more pixels for Tesseract
-        const THRESHOLD  = 140;    // 0-255 — pixels darker than this become black
-        const CONTRAST   = 1.8;    // contrast multiplier applied before threshold
+    if (!rawDataUrl) return '';
 
-        const srcW = img.naturalWidth  || img.width  || 200;
-        const srcH = img.naturalHeight || img.height || 60;
+    // Preprocess in-browser: upscale + saturation-aware binarisation
+    const processed: string = await ctx.evaluate(`
+      (async function() {
+        const SCALE = 4;
 
-        // Step 1 — draw original at 4× size into an offscreen canvas
-        const scaled = document.createElement('canvas');
-        scaled.width  = srcW * SCALE;
-        scaled.height = srcH * SCALE;
-        const sc = scaled.getContext('2d');
-        sc.imageSmoothingEnabled = false; // keep hard pixel edges
-        sc.drawImage(img, 0, 0, scaled.width, scaled.height);
+        // Load the raw data-URL into an Image element
+        const img = await new Promise((resolve, reject) => {
+          const i = new Image();
+          i.onload = () => resolve(i);
+          i.onerror = reject;
+          i.src = ${JSON.stringify(rawDataUrl)};
+        });
 
-        // Step 2 — read pixel data and apply grayscale + contrast + threshold
-        const imageData = sc.getImageData(0, 0, scaled.width, scaled.height);
-        const d = imageData.data;
+        // Draw upscaled
+        const canvas = document.createElement('canvas');
+        canvas.width  = img.width  * SCALE;
+        canvas.height = img.height * SCALE;
+        const ctx2d = canvas.getContext('2d');
+        ctx2d.imageSmoothingEnabled = false;
+        ctx2d.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+        // Pixel-level saturation-aware binarisation
+        const id = ctx2d.getImageData(0, 0, canvas.width, canvas.height);
+        const d  = id.data;
+
         for (let i = 0; i < d.length; i += 4) {
-          // Luminance-weighted grayscale
-          const gray = 0.299 * d[i] + 0.587 * d[i+1] + 0.114 * d[i+2];
-          // Contrast: stretch around midpoint 128
-          const contrasted = Math.min(255, Math.max(0, CONTRAST * (gray - 128) + 128));
-          // Binary threshold — black text on white background
-          const bw = contrasted < THRESHOLD ? 0 : 255;
-          d[i] = d[i+1] = d[i+2] = bw;
-          // d[i+3] = alpha, leave unchanged
-        }
-        sc.putImageData(imageData, 0, 0);
+          const r = d[i], g = d[i+1], b = d[i+2];
 
-        return scaled.toDataURL('image/png');
+          // HSV saturation — how "colorful" is this pixel?
+          const max = Math.max(r, g, b);
+          const min = Math.min(r, g, b);
+          const saturation = max === 0 ? 0 : (max - min) / max; // 0..1
+          const brightness = max / 255;                          // 0..1
+
+          // Classify as foreground (black) if:
+          //   • highly saturated  (coloured letter: green, orange, red, blue…)
+          //   • OR dark enough    (dark/black letter on light background)
+          const isForeground = saturation > 0.25 || brightness < 0.55;
+
+          const bw = isForeground ? 0 : 255;
+          d[i] = d[i+1] = d[i+2] = bw;
+          // alpha unchanged
+        }
+
+        ctx2d.putImageData(id, 0, 0);
+        return canvas.toDataURL('image/png');
       })()
     `);
-    return dataUrl ?? '';
+
+    return processed ?? '';
   }
 
   /**
