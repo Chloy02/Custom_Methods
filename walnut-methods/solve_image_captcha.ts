@@ -59,13 +59,27 @@ export async function solveImageCaptcha(ctx: WalnutContext) {
   }
 
   /**
+   * Resolve a selector that may be CSS or XPath into a DOM element.
+   * XPath expressions start with '/' or '('.
+   * Returns the element via a JS snippet safe to embed in evaluate().
+   */
+  function resolveElementSnippet(selector: string): string {
+    const isXPath = selector.startsWith('/') || selector.startsWith('(');
+    if (isXPath) {
+      return `document.evaluate(${JSON.stringify(selector)}, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue`;
+    }
+    return `document.querySelector(${JSON.stringify(selector)})`;
+  }
+
+  /**
    * Grab the CAPTCHA image and convert it to a base64 data-URL.
-   * Handles both <img> and <canvas> elements.
+   * Handles both <img> and <canvas> elements, and both CSS and XPath selectors.
    */
   async function getCaptchaDataUrl(): Promise<string> {
+    const elSnippet = resolveElementSnippet(captchaImageSelector);
     const dataUrl: string = await ctx.evaluate(`
       (function() {
-        const el = document.querySelector(${JSON.stringify(captchaImageSelector)});
+        const el = ${elSnippet};
         if (!el) return '';
         if (el.tagName === 'CANVAS') return el.toDataURL('image/png');
         if (el.tagName === 'IMG') {
