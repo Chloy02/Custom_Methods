@@ -9,9 +9,8 @@ import type { WalnutContext } from './walnut';
  * category: Forms
  */
 export async function clearTextFromObject(ctx: WalnutContext) {
-  // needsLocator: true → runtime resolves step.object_id → fetches the object document
-  // → picks the unique/default attribute value (XPath) → passes it as ctx.args[0]
   if (ctx.platform !== 'web') return;
-  const locator = ctx.args[0];
-  await ctx.clear(locator);
+  const locator = (ctx as any).locator;
+  if (!locator) throw new Error('No object linked to this step — attach an object in the test case editor');
+  await locator.clear();
 }
