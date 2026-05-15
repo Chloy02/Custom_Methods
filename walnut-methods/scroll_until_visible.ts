@@ -65,9 +65,42 @@ export async function scrollUntilVisible(ctx: WalnutContext) {
 
     // Bottom detection: neither rows increased nor window moved
     if (rowCount === prevRowCount && windowY === prevWindowY) {
-      throw new Error(
-        `[ScrollUntilVisible] Reached bottom after ${i + 1} scroll(s) — element not found.`
-      );
+      ctx.log(`[ScrollUntilVisible] Stagnation at iteration=${i + 1} — waiting 3s for lazy load...`);
+      await ctx.wait(3000);
+
+      // Retry scroll after grace period
+      const lastRowRetry = page.locator('tbody tr').last();
+      if (await lastRowRetry.count() > 0) {
+        await lastRowRetry.scrollIntoViewIfNeeded();
+      }
+      const windowYRetry: number = await page.evaluate(() => {
+        window.scrollBy({ top: window.innerHeight, behavior: 'instant' });
+        window.dispatchEvent(new Event('scroll', { bubbles: true }));
+        return window.scrollY;
+      });
+      await ctx.wait(500);
+
+      const rowCountRetry: number = await page.locator('tbody tr').count();
+      ctx.log(`[ScrollUntilVisible] Post-grace-period: rows=${rowCountRetry} windowY=${windowYRetry}px`);
+
+      // Check target again before deciding
+      if (await isPresent()) {
+        ctx.log('[ScrollUntilVisible] Element found after grace period — scrolling into view');
+        await scrollIntoView();
+        return;
+      }
+
+      // Still stagnant after retry → truly at bottom
+      if (rowCountRetry === rowCount && windowYRetry === windowY) {
+        throw new Error(
+          `[ScrollUntilVisible] Reached bottom after ${i + 1} scroll(s) — element not found.`
+        );
+      }
+
+      // New rows loaded — update state and continue normal loop
+      prevRowCount = rowCountRetry;
+      prevWindowY  = windowYRetry;
+      continue;
     }
 
     prevRowCount = rowCount;
