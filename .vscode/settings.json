@@ -1,0 +1,7 @@
+{
+    "files.readonlyInclude": {
+        "{**/.c4z/.extsrcs/*.PROTSYM.cbl,**/.c4z/.extsrcs/*.PROTSYM.listing}": true
+    },
+    "walnut.projectId": "6985cdc98fc3128f0097c87b",
+    "walnut.repoId": "github_Chloy02/Custom_Methods_1777363322144_bs3brmw81"
+}
