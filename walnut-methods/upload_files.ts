@@ -22,8 +22,16 @@ export async function uploadFilesToInput(ctx: WalnutContext) {
     throw new Error("filePaths is empty — set the filePaths column in this test case's test data.");
   }
 
-  const paths = rawPaths.split(',').map(p => p.trim()).filter(Boolean);
-  if (paths.length === 0) throw new Error(`No usable file path in "${rawPaths}".`);
+  const rawEntries = rawPaths.split(',').map(p => p.trim()).filter(Boolean);
+  if (rawEntries.length === 0) throw new Error(`No usable file path in "${rawPaths}".`);
+
+  // Resolve uploaded-artifact references ("ART-3", or a legacy 24-hex id) to real local
+  // file paths before Playwright touches them — setInputFiles/chooser.setFiles read from
+  // disk, so a raw "ART-3" string fails with ENOENT: no such file or directory.
+  const paths = await Promise.all(
+    rawEntries.map(p => (isArtifactRef(p) ? (ctx as any).resolveArtifact(p) : p)),
+  );
+
   ctx.log(`Uploading ${paths.length} file(s): ${paths.join(', ')}`);
 
   const target = locator.first();
@@ -58,6 +66,15 @@ export async function uploadFilesToInput(ctx: WalnutContext) {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+/** A resolved arg that points at an uploaded artifact instead of a literal path:
+ *  the friendly ref "ART-12", or a 24-char Mongo id (legacy artifacts). Mirrors
+ *  walnut-agent's isArtifactRef — kept local since custom methods can't import
+ *  agent internals directly. */
+function isArtifactRef(value: string): boolean {
+  const v = value.trim();
+  return /^ART-\d+$/i.test(v) || /^[a-f0-9]{24}$/i.test(v);
+}
 
 async function waitForTarget(ctx: WalnutWebContext, target: any) {
   try {
