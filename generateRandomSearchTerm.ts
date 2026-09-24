@@ -2,7 +2,7 @@
  * name: Generate Random Search Term
  * description: Generate a random search term and store it in $[randomSearchTerm]
  * actionType: custom_generate_random_search_term
- * context: universal
+ * context: shared
  * needsLocator: false
  * category: Custom
  */
