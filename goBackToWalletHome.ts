@@ -10,11 +10,11 @@ export async function goBackToWalletHome(ctx: any) {
   ctx.log('Attempting to return to Wallet home screen...');
 
   // Step 1: Dismiss the search screen if a Cancel button is visible
-  const cancelVisible = await ctx.isVisible("//XCUIElementTypeButton[@name='Cancel']");
+  const cancelVisible = await ctx.isVisible("//XCUIElementTypeButton[@name='close']");
 
   if (cancelVisible) {
-    ctx.log('Search screen is open — tapping Cancel to dismiss it');
-    await ctx.tap("//XCUIElementTypeButton[@name='Cancel']");
+    ctx.log('Search screen is open — tapping close button to dismiss it');
+    await ctx.tap("//XCUIElementTypeButton[@name='close']");
     await ctx.wait(500);
   } else {
     ctx.log('No Cancel button found — checking for a Back button');
